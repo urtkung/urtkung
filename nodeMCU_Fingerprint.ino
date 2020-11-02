@@ -7,12 +7,14 @@
   - วันที่สร้าง:  27/4/2019
    ---------------------------------------------------------------------------*/
 //*******************************libraries********************************
-#include <SPI.h>
-#include <Wire.h>
+#include <WiFiClientSecure.h> 
 #include <ESP8266WiFi.h>
 #include <SoftwareSerial.h>
-#include <ESP8266WebServer.h>
 #include <ESP8266HTTPClient.h>
+#include <SimpleTimer.h>           //https://github.com/jfturcot/SimpleTimer
+//OLED-----------------------------
+#include <SPI.h>
+#include <Wire.h>
 #include <Adafruit_GFX.h>          //https://github.com/adafruit/Adafruit-GFX-Library
 #include <Adafruit_SSD1306.h>      //https://github.com/adafruit/Adafruit_SSD1306
 #include <Adafruit_Fingerprint.h>  //https://github.com/adafruit/Adafruit-Fingerprint-Sensor-Library
@@ -20,23 +22,31 @@
 //Fingerprint scanner Pins
 #define Finger_Rx 12 //D5
 #define Finger_Tx 14 //D6
-// ประกาศตัวแปรสำหรับ SSD1306 ให้เชื่อมต่อแบบ I2C
-#define SCREEN_WIDTH 128 
-#define SCREEN_HEIGHT 64 
-#define OLED_RESET     4 // pin สำหรับใช้ reset จอ OLED
+// จอ OLED SSD1306 เชื่อมต่อแบบ I2C ** pins = (22/d1 SCL, 21/d2 SDA)- **
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     0 // Reset pin 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 //************************************************************************
+SimpleTimer timer;
 SoftwareSerial mySerial(Finger_Rx, Finger_Tx);
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 //************************************************************************
-const char *ssid = "urtwifi";  //ตั้งค่า wifi  *
-const char *password = "12345678";
+/* wifi & token ที่ได้จากเว็ป */
+const char *ssid = "urtphone";  // SSID
+const char *password = "2259322593"; // Password
+const char* device_token  = "78bcc16e";  // token ของอุปกรณ์ที่ได้จากเว็ป
+//************************************************************************
+String getData, Link;
+String URL = "http://ck.comtms.com/getdata.php"; //IP หรือ โดเมนเนมของเว็ป
 
-String postData ; //การรับส่งข้อมูลแบบ post ไปยังเว็ปไซต์
-String link = "ck.comtms.com/getdata.php"; //โดเมนเนมของเว็ปไซต์ของเรา (ไม่รอบรับ https) *
-int FingerID = 0;     
+//************************************************************************
+int FingerID = 0, t1, t2;                                  // Fingerprint ID จากเครื่องสแกน
+bool device_Mode = false;                           // Default Mode Enrollment
+bool firstConnect = false;
 uint8_t id;
-//*************************รูปไอคอนลายนิ้วมือแสดงบนจอ OLED*********************************
+unsigned long previousMillis = 0;
+//*************************ไอคอนรูปลายนิ้วมือสำหรับแสดงบนจอ OLED*********************************
 #define Wifi_start_width 54
 #define Wifi_start_height 49
 const uint8_t PROGMEM Wifi_start_bits[] = {
@@ -489,30 +499,21 @@ const uint8_t PROGMEM FinPr_scan_bits[] = {
 };
 //************************************************************************
 void setup() {
-
   Serial.begin(115200);
-  
+  delay(1000);
   //-----------initiate OLED display-------------
-  
-  // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
     Serial.println(F("SSD1306 allocation failed"));
     for(;;); // Don't proceed, loop forever
   }
-  // Show initial display buffer contents on the screen --
-  // the library initializes this with an Adafruit splash screen.
-  // you can delet these three lines if you don't want to get the Adfruit logo appear
+  // ลบสองบรรทัดนี้หากไม่ต้องการให้แสดงโลโก้ของ Adafruit
   display.display();
   delay(2000); // Pause for 2 seconds
   display.clearDisplay();
-  
   //---------------------------------------------
-  
   connectToWiFi();
-  
   //---------------------------------------------
-  
-  // set the data rate for the sensor serial port
+  // Set the data rate for the sensor serial port
   finger.begin(57600);
   Serial.println("\n\nAdafruit finger detect test");
 
@@ -529,52 +530,49 @@ void setup() {
     while (1) { delay(1); }
   }
   //---------------------------------------------
-  
   finger.getTemplateCount();
   Serial.print("Sensor contains "); Serial.print(finger.templateCount); Serial.println(" templates");
   Serial.println("Waiting for valid finger...");
-  
-  //------------*test the connection*------------
-  
-  //SendFingerprintID( FingerID );
-  
+  //Timers---------------------------------------
+  timer.setInterval(25000L, CheckMode);
+  t1 = timer.setInterval(10000L, ChecktoAddID);      //Set an internal timer every 10sec to check if there a new fingerprint in the website to add it.
+  t2 = timer.setInterval(15000L, ChecktoDeleteID);   //Set an internal timer every 15sec to check wheater there an ID to delete in the website.
+  //---------------------------------------------
+  CheckMode();
 }
 //************************************************************************
 void loop() {
-
-  //เช็คสถานะการเชื่อมต่อ wifi
-  if(WiFi.status() != WL_CONNECTED){
-    connectToWiFi();
+  timer.run();      //Keep the timer in the loop function in order to update the time as soon as possible
+  //check if there's a connection to Wi-Fi or not
+  if(!WiFi.isConnected()){
+    if (millis() - previousMillis >= 10000) {
+      previousMillis = millis();
+      connectToWiFi();    //Retry to connect to Wi-Fi
+    }
   }
-  //---------------------------------------------
-  //รับค่า Fingerprint_ID โดยเริ่มจาก เลข 1 ถึง 127  ถ้าเป็น 0 ,-1,-2,... จะเกิดการขัดข้อง
-  FingerID = getFingerprintID();  
-  delay(50);            
-  
-  //---------------------------------------------
-  
-  DisplayFingerprintID();
-  
-  //---------------------------------------------
-
-  ChecktoAddID();
-
-  //---------------------------------------------
-  
-  ChecktoDeleteID();
-
-  //---------------------------------------------
+  CheckFingerprint();   //Check the sensor if the there a finger.
+  delay(10);
 }
-//************แสดงสถานะ fingerprint_ID  บนจอ OLED*************
+//************************************************************************
+void CheckFingerprint(){
+//  unsigned long previousMillisM = millis();
+//  Serial.println(previousMillisM);
+  // If there no fingerprint has been scanned return -1 or -2 if there an error or 0 if there nothing, The ID start form 1 to 127
+  // Get the Fingerprint ID from the Scanner
+  FingerID = getFingerprintID();
+  DisplayFingerprintID();
+//  Serial.println(millis() - previousMillisM);
+  
+}
+//************แสดงสถานะ fingerprint ID บนจอ OLED*************
 void DisplayFingerprintID(){
-  //ตรสจพบลายนิ้วมือ
+  //Fingerprint has been detected 
   if (FingerID > 0){
     display.clearDisplay();
     display.drawBitmap( 34, 0, FinPr_valid_bits, FinPr_valid_width, FinPr_valid_height, WHITE);
     display.display();
-    
-    SendFingerprintID( FingerID ); // ส่ง Fingerprint ID ไปที่เว็ปไซต์
-        
+    SendFingerprintID( FingerID ); // Send the Fingerprint ID to the website.
+    delay(2000);
   }
   //---------------------------------------------
   //No finger detected
@@ -600,56 +598,54 @@ void DisplayFingerprintID(){
 }
 //************send the fingerprint ID to the website*************
 void SendFingerprintID( int finger ){
-  
-  HTTPClient http;    //Declare object of class HTTPClient
-  //Post Data
-  postData = "FingerID=" + String(finger); // Add the Fingerprint ID to the Post array in order to send it
-  // Post methode
-
-  http.begin(link); //initiate HTTP request, put your Website URL or Your Computer IP 
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");    //Specify content-type header
-  
-  int httpCode = http.POST(postData);   //Send the request
-  String payload = http.getString();    //Get the response payload
-  
-  Serial.println(httpCode);   //Print HTTP return code
-  Serial.println(payload);    //Print request response payload
-  Serial.println(postData);   //Post Data
-  Serial.println(finger);     //Print fingerprint ID
-
-  if (payload.substring(0, 5) == "login") {
-    String user_name = payload.substring(5);
-//  Serial.println(user_name);
+  Serial.println("Sending the Fingerprint ID");
+  if(WiFi.isConnected()){
+    HTTPClient http;    //Declare object of class HTTPClient
+    //GET Data
+    getData = "?FingerID=" + String(finger) + "&device_token=" + device_token; // Add the Fingerprint ID to the Post array in order to send it
+    //GET methode
+    Link = URL + getData;
+    http.begin(Link); //initiate HTTP request   //Specify content-type header
     
-    display.clearDisplay();
-    display.setTextSize(2);             // Normal 2:2 pixel scale
-    display.setTextColor(WHITE);        // Draw white text
-    display.setCursor(15,0);             // Start at top-left corner
-    display.print(F("Welcome"));
-    display.setCursor(0,20);
-    display.print(user_name);
-    display.display();
-  }
-  else if (payload.substring(0, 6) == "logout") {
-    String user_name = payload.substring(6);
-//  Serial.println(user_name);
+    int httpCode = http.GET();   //Send the request
+    String payload = http.getString();    //Get the response payload
     
-    display.clearDisplay();
-    display.setTextSize(2);             // Normal 2:2 pixel scale
-    display.setTextColor(WHITE);        // Draw white text
-    display.setCursor(10,0);             // Start at top-left corner
-    display.print(F("Good Bye"));
-    display.setCursor(0,20);
-    display.print(user_name);
-    display.display();
-  }
-  delay(1000);
+    Serial.println(httpCode);   //Print HTTP return code
+    Serial.println(payload);    //Print request response payload
+    Serial.println(finger);     //Print fingerprint ID
   
-  postData = "";
-  http.end();  //Close connection
+    if (payload.substring(0, 5) == "login") {
+      String user_name = payload.substring(5);
+  //  Serial.println(user_name);
+      
+      display.clearDisplay();
+      display.setTextSize(2);             // Normal 2:2 pixel scale
+      display.setTextColor(WHITE);        // Draw white text
+      display.setCursor(15,0);             // Start at top-left corner
+      display.print(F("Welcome"));
+      display.setCursor(0,20);
+      display.print(user_name);
+      display.display();
+    }
+    else if (payload.substring(0, 6) == "logout") {
+      String user_name = payload.substring(6);
+  //  Serial.println(user_name);
+      
+      display.clearDisplay();
+      display.setTextSize(2);             // Normal 2:2 pixel scale
+      display.setTextColor(WHITE);        // Draw white text
+      display.setCursor(10,0);             // Start at top-left corner
+      display.print(F("Good Bye"));
+      display.setCursor(0,20);
+      display.print(user_name);
+      display.display();
+    }
+    delay(10);
+    http.end();  //Close connection
+  }
 }
-//********************Get the Fingerprint ID******************
-int getFingerprintID() {
+//********************รับค่า Fingerprint ID แบบ get******************
+int  getFingerprintID() {
   uint8_t p = finger.getImage();
   switch (p) {
     case FINGERPRINT_OK:
@@ -705,32 +701,34 @@ int getFingerprintID() {
     return -2;
   }   
   // found a match!
-  //Serial.print("Found ID #"); Serial.print(finger.fingerID); 
-  //Serial.print(" with confidence of "); Serial.println(finger.confidence); 
+  Serial.print("Found ID #"); Serial.print(finger.fingerID); 
+  Serial.print(" with confidence of "); Serial.println(finger.confidence); 
 
   return finger.fingerID;
 }
 //******************Check if there a Fingerprint ID to delete******************
 void ChecktoDeleteID(){
-
-  HTTPClient http;    //Declare object of class HTTPClient
-  //Post Data
-  postData = "DeleteID=check"; // Add the Fingerprint ID to the Post array in order to send it
-  // Post methode
-
-  http.begin(link); //initiate HTTP request, put your Website URL or Your Computer IP 
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");    //Specify content-type header
+  Serial.println("Check to Delete ID");
+  if(WiFi.isConnected()){
+    HTTPClient http;    //Declare object of class HTTPClient
+    //GET Data
+    getData = "?DeleteID=check&device_token=" + String(device_token); // Add the Fingerprint ID to the Post array in order to send it
+    //GET methode
+    Link = URL + getData;
+    http.begin(Link); //initiate HTTP request,
+//    Serial.println(Link);
+    int httpCode = http.GET();   //Send the request
+    String payload = http.getString();    //Get the response payload
   
-  int httpCode = http.POST(postData);   //Send the request
-  String payload = http.getString();    //Get the response payload
-
-  if (payload.substring(0, 6) == "del-id") {
-    String del_id = payload.substring(6);
-    Serial.println(del_id);
-    deleteFingerprint( del_id.toInt() );
+    if (payload.substring(0, 6) == "del-id") {
+      String del_id = payload.substring(6);
+      Serial.println(del_id);
+      http.end();  //Close connection
+      deleteFingerprint( del_id.toInt() );
+      delay(1000);
+    }
+    http.end();  //Close connection
   }
-  
-  http.end();  //Close connection
 }
 //******************ลบ Finpgerprint ID*****************
 uint8_t deleteFingerprint( int id) {
@@ -784,36 +782,79 @@ uint8_t deleteFingerprint( int id) {
     return p;
   }   
 }
-//******************เซ็คถ้ามี Fingerprint ID ที่จะใส่******************
+//******************ตรวจสอบถ้ามี Fingerprint ID ที่จะเพิ่ม******************
 void ChecktoAddID(){
-
-  HTTPClient http;    //Declare object of class HTTPClient
-  //Post Data
-  postData = "Get_Fingerid=get_id"; // Add the Fingerprint ID to the Post array in order to send it
-  // Post methode
-
-  http.begin(link); //initiate HTTP request, put your Website URL or Your Computer IP 
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");    //Specify content-type header
+//  Serial.println("Check to Add ID");
+  if(WiFi.isConnected()){
+    HTTPClient http;    //Declare object of class HTTPClient
+    //GET Data
+    getData = "?Get_Fingerid=get_id&device_token=" + String(device_token); // Add the Fingerprint ID to the Post array in order to send it
+    //GET methode
+    Link = URL + getData;
+    http.begin(Link); //initiate HTTP request,
+//    Serial.println(Link);
+    int httpCode = http.GET();   //Send the request
+    String payload = http.getString();    //Get the response payload
   
-  int httpCode = http.POST(postData);   //Send the request
-  String payload = http.getString();    //Get the response payload
-
-  if (payload.substring(0, 6) == "add-id") {
-    String add_id = payload.substring(6);
-    Serial.println(add_id);
-    id = add_id.toInt();
-    getFingerprintEnroll();
+    if (payload.substring(0, 6) == "add-id") {
+      String add_id = payload.substring(6);
+      Serial.println(add_id);
+      id = add_id.toInt();
+      http.end();  //Close connection
+      getFingerprintEnroll();
+    }
+    http.end();  //Close connection
   }
-  http.end();  //Close connection
+}
+//******************ตรวจสอบโหมดการใช้งาน*****************
+void CheckMode(){
+  Serial.println("Check Mode");
+  if(WiFi.isConnected()){
+    HTTPClient http;    //Declare object of class HTTPClient
+    //GET Data
+    getData = "?Check_mode=get_mode&device_token=" + String(device_token); // Add the Fingerprint ID to the Post array in order to send it
+    //GET methode
+    Link = URL + getData;
+    http.begin(Link); //initiate HTTP request,
+//    Serial.println(Link);
+    int httpCode = http.GET();   //Send the request
+    String payload = http.getString();    //Get the response payload
+  
+    if (payload.substring(0, 4) == "mode") {
+      String dev_mode = payload.substring(4);
+      int devMode = dev_mode.toInt();
+      if(!firstConnect){
+        device_Mode = devMode;
+        firstConnect = true;
+      }
+//      Serial.println(dev_mode);
+      if(device_Mode && devMode){
+        device_Mode = false;
+        timer.disable(t1);
+        timer.disable(t2);
+        Serial.println("Deivce Mode: Attandance");
+      }
+      else if(!device_Mode && !devMode){
+        device_Mode = true;
+        timer.enable(t1);
+        timer.enable(t2);
+        Serial.println("Deivce Mode: Enrollment");
+      }
+      http.end();  //Close connection
+    }
+    http.end();  //Close connection
+  }
+//  Serial.print("Number of Timers: ");
+//  Serial.println(timer.getNumTimers());
 }
 //******************ลงทะเบียน Finpgerprint ID*****************
 uint8_t getFingerprintEnroll() {
-
   int p = -1;
   display.clearDisplay();
   display.drawBitmap( 34, 0, FinPr_scan_bits, FinPr_scan_width, FinPr_scan_height, WHITE);
   display.display();
   while (p != FINGERPRINT_OK) {
+          
     p = finger.getImage();
     switch (p) {
     case FINGERPRINT_OK:
@@ -844,8 +885,7 @@ uint8_t getFingerprintEnroll() {
     }
   }
 
-  // OK สำเร็จ!
-
+  // OK success!
   p = finger.image2Tz(1);
   switch (p) {
     case FINGERPRINT_OK:
@@ -930,7 +970,10 @@ uint8_t getFingerprintEnroll() {
       display.display();
       break;
     case FINGERPRINT_IMAGEMESS:
-      Serial.println("Image too messy");
+      //Serial.println("Image too messy");
+      display.clearDisplay();
+      display.drawBitmap( 34, 0, FinPr_invalid_bits, FinPr_invalid_width, FinPr_invalid_height, WHITE);
+      display.display();
       return p;
     case FINGERPRINT_PACKETRECIEVEERR:
       Serial.println("Communication error");
@@ -951,29 +994,32 @@ uint8_t getFingerprintEnroll() {
   
   p = finger.createModel();
   if (p == FINGERPRINT_OK) {
-    //Serial.println("Prints matched!");
+    Serial.println("Prints matched!");
     display.clearDisplay();
     display.drawBitmap( 34, 0, FinPr_valid_bits, FinPr_valid_width, FinPr_valid_height, WHITE);
     display.display();
   } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
-    Serial.println("Communication error");
+      Serial.println("Communication error");
     return p;
   } else if (p == FINGERPRINT_ENROLLMISMATCH) {
-    Serial.println("Fingerprints did not match");
+      Serial.println("Fingerprints did not match");
+      display.clearDisplay();
+      display.drawBitmap( 34, 0, FinPr_invalid_bits, FinPr_invalid_width, FinPr_invalid_height, WHITE);
+      display.display();
     return p;
   } else {
-    Serial.println("Unknown error");
+      Serial.println("Unknown error");
     return p;
   }   
   
   Serial.print("ID "); Serial.println(id);
   p = finger.storeModel(id);
   if (p == FINGERPRINT_OK) {
-    //Serial.println("Stored!");
+    Serial.println("Stored!");
     display.clearDisplay();
     display.drawBitmap( 34, 0, FinPr_valid_bits, FinPr_valid_width, FinPr_valid_height, WHITE);
     display.display();
-    confirmAdding();
+    confirmAdding(id);
   } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
     Serial.println("Communication error");
     return p;
@@ -988,32 +1034,37 @@ uint8_t getFingerprintEnroll() {
     return p;
   }   
 }
-//******************Check if there a Fingerprint ID to add******************
-void confirmAdding(){
-
-  HTTPClient http;    //Declare object of class HTTPClient
-  //Post Data
-  postData = "confirm_id=" + String(id); // Add the Fingerprint ID to the Post array in order to send it
-  // Post methode
-
-  http.begin(link); //initiate HTTP request, put your Website URL or Your Computer IP 
-  http.addHeader("Content-Type", "application/x-www-form-urlencoded");    //Specify content-type header
-  
-  int httpCode = http.POST(postData);   //Send the request
-  String payload = http.getString();    //Get the response payload
-
-  display.clearDisplay();
-  display.setTextSize(1.5);             // Normal 1:1 pixel scale
-  display.setTextColor(WHITE);        // Draw white text
-  display.setCursor(0,0);             // Start at top-left corner
-  display.print(payload);
-  display.display();
-  delay(1000);
-  Serial.println(payload);
-  
-  http.end();  //Close connection
+//******************เช็ค Fingerprint ID ที่จะ add******************
+void confirmAdding(int id){
+  Serial.println("confirm Adding");
+  if(WiFi.status() == WL_CONNECTED){
+    HTTPClient http;    //Declare object of class HTTPClient
+    //GET Data
+    getData = "?confirm_id=" + String(id) + "&device_token=" + String(device_token); // Add the Fingerprint ID to the Post array in order to send it
+    //GET methode
+    Link = URL + getData;
+    
+    http.begin(Link); //initiate HTTP request,
+//    Serial.println(Link);
+    int httpCode = http.GET();   //Send the request
+    String payload = http.getString();    //Get the response payload
+    if(httpCode == 200){
+      display.clearDisplay();
+      display.setTextSize(1.5);             // Normal 1:1 pixel scale
+      display.setTextColor(WHITE);        // Draw white text
+      display.setCursor(0,0);             // Start at top-left corner
+      display.print(payload);
+      display.display();
+      Serial.println(payload);
+      delay(2000);
+    }
+    else{
+      Serial.println("Error Confirm!!");      
+    }
+    http.end();  //Close connection
+  }
 }
-//********************เชื่อมต่อกับ wifi ******************
+//********************เชื่อมต่อกับ WiFi******************
 void connectToWiFi(){
     WiFi.mode(WIFI_OFF);        //Prevents reconnection issue (taking too long to connect)
     delay(1000);
@@ -1033,23 +1084,36 @@ void connectToWiFi(){
     display.drawBitmap( 73, 10, Wifi_start_bits, Wifi_start_width, Wifi_start_height, WHITE);
     display.display();
     
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
+    uint32_t periodToConnect = 30000L;
+    for(uint32_t StartToConnect = millis(); (millis()-StartToConnect) < periodToConnect;){
+      if ( WiFi.status() != WL_CONNECTED ){
+        delay(500);
+        Serial.print(".");
+      } else{
+        break;
+      }
     }
-    Serial.println("");
-    Serial.println("Connected");
     
-    display.clearDisplay();
-    display.setTextSize(2);             // Normal 1:1 pixel scale
-    display.setTextColor(WHITE);        // Draw white text
-    display.setCursor(8, 0);             // Start at top-left corner
-    display.print(F("Connected \n"));
-    display.drawBitmap( 33, 15, Wifi_connected_bits, Wifi_connected_width, Wifi_connected_height, WHITE);
-    display.display();
-    
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());  //IP address assigned to your ESP
-
+    if(WiFi.isConnected()){
+      Serial.println("");
+      Serial.println("Connected");
+      
+      display.clearDisplay();
+      display.setTextSize(2);             // Normal 1:1 pixel scale
+      display.setTextColor(WHITE);        // Draw white text
+      display.setCursor(8, 0);             // Start at top-left corner
+      display.print(F("Connected \n"));
+      display.drawBitmap( 33, 15, Wifi_connected_bits, Wifi_connected_width, Wifi_connected_height, WHITE);
+      display.display();
+      
+      Serial.print("IP address: ");
+      Serial.println(WiFi.localIP());  //IP address assigned to your ESP
+    }
+    else{
+      Serial.println("");
+      Serial.println("Not Connected");
+      WiFi.mode(WIFI_OFF);
+      delay(1000);
+    }
+    delay(1000);
 }
-//=======================================================================
