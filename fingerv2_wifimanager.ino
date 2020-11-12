@@ -1,3 +1,12 @@
+* -----------------------------------------------------------------------------
+  - ระบบเซ็คการเข้ารวมกิจกรรมแบบออนไลน์ด้วยเครื่องสแกนลายนิ้วมือ
+  
+   -----------------------------------------------------------------------------
+  Code ส่วนนี้ได้รับความอนุเคราะห์จากช่องยูทูป "Electronics Tech channel" 
+  - ผู้สร้างฉบับ:  https://www.youtube.com/ElectronicsTechHaIs
+  - วันที่สร้าง:  27/4/2019
+   ---------------------------------------------------------------------------*/
+//*******************************libraries********************************
 #include <WiFiClientSecure.h> 
 #include <ESP8266WiFi.h>
 #include <SoftwareSerial.h>
@@ -29,9 +38,9 @@ SoftwareSerial mySerial(Finger_Rx, Finger_Tx);
 Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
 //************************************************************************
 /* wifi & token from web */
-const char *ssid = "DM";
-const char *password = "00000000";
-const char* device_token  = "78bcc16e";
+const char *ssid = "DM";  ///// ลบบรรทัดนี้ได้เนื่องจากเปลี่ยนไปใช้ wifimanager
+const char *password = "00000000"; ///// ลบบรรทัดนี้ได้เนื่องจากเปลี่ยนไปใช้ wifimanager
+const char* device_token  = "78bcc16e"; //// Token ของอุปกรณ์ที่ได้จากเว็ปไซต์
 //************************************************************************
 String getData, Link;
 String URL = "http://191.96.37.192/getdata.php"; //computer IP or the server domain
@@ -43,7 +52,8 @@ uint8_t id;
 unsigned long previousMillis = 0;
 
 
-//*************************Biometric Icons*********************************
+//*************************Icons*********************************
+//***icon ที่แสดงตอนเปิดเครื่อง
 const unsigned char myBitmap [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -110,7 +120,7 @@ const unsigned char myBitmap [] PROGMEM = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
-////
+////wifi
 #define Wifi_start_width 54
 #define Wifi_start_height 49
 const uint8_t PROGMEM Wifi_start_bits[] = {
@@ -1133,7 +1143,7 @@ void confirmAdding(int id){
     http.end();  //Close connection
   }
 }
-//********************connect to the WiFi******************
+//********************connect to the WiFi****************** ส่วนนี้ใช้ wifiManager
 void connectToWiFi(){
     WiFi.mode(WIFI_OFF);        //Prevents reconnection issue (taking too long to connect)
     delay(1000);
